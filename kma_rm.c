@@ -38,6 +38,8 @@
 #include <assert.h>
 #include <stdlib.h>
 
+#include <stdio.h>
+
 /************Private include**********************************************/
 #include "kma_page.h"
 #include "kma.h"
@@ -49,24 +51,152 @@
  *  structures and arrays, line everything up in neat columns.
  */
 
-/************Global Variables*********************************************/
+typedef struct blockT
+{
+  struct blockT* prev;
+  struct blockT* next;
+  bool used;
+} block_t;
 
+/************Global Variables*********************************************/
+static kma_page_t* firstPage = NULL;
 /************Function Prototypes******************************************/
+
+/***********************************************************************
+ *  Title: Calculate Block Size
+ * ---------------------------------------------------------------------
+ *    Purpose: Calculates the amount of usable memory in a block
+ *    Input: a block
+ *    Output: The amount of usable memory in the given block
+ ***********************************************************************/
+int CalcBlockSize(block_t*);
 
 /************External Declaration*****************************************/
 
 /**************Implementation***********************************************/
 
+int CalcBlockSize(block_t* block)
+{
+  if(block == NULL)
+    return -1;
+
+  if(block->next != NULL)
+    return (void*)(block->next) - (void*)block - sizeof(*block);
+
+  void* endPage = BASEADDR(block) + PAGESIZE;
+  return endPage - (void*)block - sizeof(*block);
+}
+
 void*
 kma_malloc(kma_size_t size)
 {
-  return NULL;
+  printf("malloc\n");
+  if(size > PAGESIZE - sizeof(block_t))
+    return NULL;
+  if(firstPage == NULL)
+  {
+    firstPage = get_page();
+    block_t* head = (block_t*)(firstPage->ptr);
+    head->prev = NULL;
+    head->next = NULL;
+    head->used = FALSE;
+  }
+  block_t* block = (block_t*)firstPage->ptr;
+  while(block->used || CalcBlockSize(block) < size)
+  {
+    if(block->next == NULL)
+    {
+      kma_page_t* nextPage = get_page();
+      block->next = (block_t*)(nextPage->ptr);
+      block_t* pageHead = block->next;
+      pageHead->prev = block;
+      pageHead->next = NULL;
+      pageHead->used = FALSE;
+    }
+    block = block->next;
+  }
+  block->used = TRUE;
+
+  block_t* newNext = (block_t*)((void*)block + sizeof(*block) + size);
+
+  int availableSpace;
+  if(block->next != NULL)
+    availableSpace = (void*)(block->next) - (void*)newNext;
+  else
+    availableSpace = BASEADDR(block) + PAGESIZE - (void*)newNext;
+  
+  if(availableSpace > sizeof(block_t))
+  {
+    newNext->prev = block;
+    newNext->next = block->next;
+    newNext->used = FALSE;
+    block->next = newNext;
+    if(newNext->next != NULL)
+      newNext->next->prev = newNext;
+  }
+
+  
+
+  return (void*)block + sizeof(*block);
 }
 
 void
 kma_free(void* ptr, kma_size_t size)
 {
-  ;
+  printf("free\n");
+  if(ptr == NULL)
+    return;
+  block_t* curBlock = (block_t*)(ptr - sizeof(block_t));
+  if((curBlock->prev != NULL) && (!curBlock->prev->used))
+  {
+    if((curBlock->next != NULL) && (!curBlock->next->used))
+    {
+      curBlock->prev->next = curBlock->next->next;
+      if(curBlock->next->next != NULL)
+        curBlock->next->next->prev = curBlock->prev;
+    }
+    else
+    {
+      curBlock->prev->next = curBlock->next;
+      if(curBlock->next != NULL)
+        curBlock->next->prev = curBlock->prev;
+    }
+  }
+  else
+  {
+    curBlock->used = FALSE;
+    if((curBlock->next != NULL) && (!curBlock->next->used))
+      curBlock->next = curBlock->next->next;
+  }
+
+  if(curBlock->next != NULL)
+    curBlock->next->prev = curBlock->prev;
+
+  void* base = BASEADDR(curBlock);
+  block_t* temp = curBlock->prev;
+  bool pageEmpty = TRUE;
+  while(BASEADDR(temp) == base && pageEmpty)
+  {
+    if(temp->used)
+      pageEmpty = FALSE;
+    
+    temp = temp->prev;
+  }
+  temp = curBlock->next;
+  while(BASEADDR(temp) == base && pageEmpty)
+  {
+    if(temp->used)
+      pageEmpty = FALSE;
+
+    temp = temp->next;
+  }
+
+  if(pageEmpty)
+  {
+    if(base == (void*)firstPage)
+      firstPage = (kma_page_t*) curBlock->next;
+    free_page((kma_page_t*)base);
+  }
 }
 
 #endif // KMA_RM
