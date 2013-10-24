@@ -93,10 +93,10 @@ int CalcBlockSize(block_t* block)
     return -1;
 
   if(block->next != NULL && SamePage(block, block->next))
-    return (void*)(block->next) - (void*)block - sizeof(*block);
+    return (int)((size_t)(block->next) - (size_t)block - sizeof(*block));
 
-  void* endPage = BASEADDR(block) + PAGESIZE;
-  return endPage - (void*)block - sizeof(*block);
+  void* endPage = (void*)((size_t)BASEADDR(block) + PAGESIZE);
+  return (int)((size_t)endPage - (size_t)block - sizeof(*block));
 }
 
 void*
@@ -108,21 +108,21 @@ kma_malloc(kma_size_t size)
   {
     firstPage = get_page();
     *((kma_page_t**)firstPage->ptr) = firstPage;
-    block_t* head = (block_t*)(firstPage->ptr + sizeof(kma_page_t*));
+    block_t* head = (block_t*)((size_t)firstPage->ptr + sizeof(kma_page_t*));
     head->prev = NULL;
     head->next = NULL;
     head->used = FALSE;
   }
 
 
-  block_t* block = (block_t*)(firstPage->ptr + sizeof(kma_page_t*));
+  block_t* block = (block_t*)((size_t)firstPage->ptr + sizeof(kma_page_t*));
   while(block->used || CalcBlockSize(block) < size)
   {
     if(block->next == NULL)
     {
       kma_page_t* nextPage = get_page();
       *((kma_page_t**)nextPage->ptr) = nextPage;
-      block_t* pageHead = (block_t*)(nextPage->ptr + sizeof(kma_page_t*));
+      block_t* pageHead = (block_t*)((size_t)nextPage->ptr + sizeof(kma_page_t*));
       block->next = pageHead;
       pageHead->prev = block;
       pageHead->next = NULL;
@@ -132,13 +132,13 @@ kma_malloc(kma_size_t size)
   }
   block->used = TRUE;
 
-  block_t* newNext = (block_t*)((void*)block + sizeof(*block) + size);
+  block_t* newNext = (block_t*)((size_t)block + sizeof(*block) + size);
 
   int availableSpace;
   if(block->next != NULL && SamePage(block, block->next))
-    availableSpace = (void*)(block->next) - (void*)newNext;
+    availableSpace = (int)((size_t)(block->next) - (size_t)newNext);
   else
-    availableSpace = BASEADDR(block) + PAGESIZE - (void*)newNext;
+    availableSpace = (int)((size_t)BASEADDR(block) + PAGESIZE - (size_t)newNext);
   
   if(availableSpace > sizeof(block_t))
   {
@@ -151,7 +151,7 @@ kma_malloc(kma_size_t size)
   }
 
 
-  return (void*)block + sizeof(*block);
+  return (void*)((size_t)block + sizeof(*block));
 }
 
 void
@@ -160,7 +160,7 @@ kma_free(void* ptr, kma_size_t size)
   if(ptr == NULL)
     return;
 
-  block_t* curBlock = (block_t*)(ptr - sizeof(block_t));
+  block_t* curBlock = (block_t*)((size_t)ptr - sizeof(block_t));
 
   if((curBlock->prev != NULL) && 
      SamePage(curBlock, curBlock->prev) && 
@@ -199,11 +199,11 @@ kma_free(void* ptr, kma_size_t size)
 
   // There will always be a block_t struct at the beginning of any
   // page.
-  block_t* base = (block_t*)(BASEADDR(curBlock) + sizeof(kma_page_t*));
+  block_t* base = (block_t*)((size_t)BASEADDR(curBlock) + sizeof(kma_page_t*));
   
   if(CalcBlockSize(base) >= PAGESIZE - sizeof(*base) - sizeof(kma_page_t*))
   {
-    if(base == (block_t*)(firstPage->ptr + sizeof(kma_page_t*)))
+    if(base == (block_t*)((size_t)firstPage->ptr + sizeof(kma_page_t*)))
     {
       if(base->next == NULL)
         firstPage = NULL;
