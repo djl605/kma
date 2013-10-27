@@ -49,38 +49,55 @@
  *  structures and arrays, line everything up in neat columns.
  */
 
-  typedef struct
-  {
-    kma_page_t* thisPage;
-    kma_page_t* nextPage;
-  } page_header_t;
+ typedef struct block_header_t
+ {
+   // info includes bits telling the size of a block and whether it is used
+   size_t info;
+ } block_header_t;
 
-  typedef struct
-  {
-    int size;
-    bool used;
-  } block_header_t;
+ typedef struct block_t
+ {
+   block_header_t* block;
+   size_t size;
+   struct block_t* next;
+   struct block_t* prev;
+ } block_t;
+
+ typedef struct page_t
+ {
+   kma_page_t* page;
+   struct page_t* next;
+   struct page_t* prev;
+ } page_t;
+
+ typedef struct bookkeeping_header_t
+ {
+   int numHeaders;
+   kma_page_t* thisPage;
+   
+   // These are only used in the first book-keeping page, and point
+   // to the beginning of the linked lists. In other book-keeping pages,
+   // they are set to NULL.
+   block_t* firstBlock;
+   block_t* lastBlock;
+   page_t* firstPage;
+   page_t* lastPage;
+   void* nextAvailable;
+ } bookkeeping_header_t;
+
+
 
 /************Global Variables*********************************************/
-static kma_page_t* firstPage = NULL;
+static kma_page_t* bookkeepingPage = NULL;
 /************Function Prototypes******************************************/
-inline bool TopOfPage(block_header_t*);
-inline void InitPage(kma_page_t*);
-inline block_header_t* NextPage(block_header_t*);
 inline int NextPowerOfTwo(int);
+inline bool Used(block_header_t*);
 
 block_header_t* Buddy(block_header_t*, int);
-block_header_t* TraverseBlock(int, int, block_header_t*, bool);
-block_header_t* FindAvailableBlock(int);
-void* SplitBlock(block_header_t*, int);
+void CreateBookkeepingPage(void);
 /************External Declaration*****************************************/
 
 /**************Implementation***********************************************/
-
-inline bool TopOfPage(block_header_t* block)
-{
-  return (((size_t)block) % PAGESIZE) == 0;
-}
 
 inline int NextPowerOfTwo(int n)
 {
@@ -89,6 +106,11 @@ inline int NextPowerOfTwo(int n)
     i <<= 1;
 
   return i;
+}
+
+inline bool Used(block_header_t* block)
+{
+  return (block->info & (PAGESIZE << 1));
 }
 
 
@@ -105,133 +127,272 @@ block_header_t* Buddy(block_header_t* block, int size)
   return (block_header_t*)((size_t)block ^ (1 << (shift - 1)));
 }
 
-inline block_header_t* NextPage(block_header_t* pageHead)
+void CreateBookkeepingPage(void)
 {
-  kma_page_t* nextPage = ((page_header_t*)((size_t)pageHead + sizeof(*pageHead)))->nextPage;
-  if(nextPage == NULL)
-    return NULL;
-  return (block_header_t*)(nextPage->ptr);
-}
-
-block_header_t* FindAvailableBlock(int needSize)
-{
-  block_header_t* page = (block_header_t*)(firstPage->ptr);
-
-  //This should never happen, but just in case
-  if(page == NULL)
-    return NULL;
-  
-  //prevBlock so we can add to the linked list if we need to alloc a new page.
-  block_header_t* prevPage;
-
-  while(page != NULL)
-  {
-    prevPage = page;
-    block_header_t* available = TraverseBlock(needSize, PAGESIZE, page, FALSE);
-    if(available != NULL)
-      return available;
-    page = NextPage(page);
-  }
-
-  // We have searched through all of the pages and there are no available blocks that are big enough.
-  // Allocate a new page.
   kma_page_t* newPage = get_page();
-  InitPage(newPage);
-  ((page_header_t*)((size_t)prevPage + sizeof(*prevPage)))->nextPage = newPage;
-  return (block_header_t*)(newPage->ptr);
+  bookkeeping_header_t* newBookkeepingHeader = (bookkeeping_header_t*)(newPage->ptr);
+  newBookkeepingHeader->numHeaders = 0;
+  newBookkeepingHeader->thisPage = newPage;
+  bookkeeping_header_t* header = (bookkeeping_header_t*)(bookkeepingPage->ptr);
+  header->nextAvailable = (void*)((size_t)newBookkeepingHeader + sizeof(bookkeeping_header_t));
 }
 
-
-block_header_t* TraverseBlock(int needSize, int inspectingSize, block_header_t* head, bool checkBuddy)
-{
-  int effectiveSize = needSize;
-  if(TopOfPage(head))
-    effectiveSize += sizeof(page_header_t);
-  effectiveSize = NextPowerOfTwo(effectiveSize);
-
-  if(inspectingSize < effectiveSize)
-    return NULL;
-
-  // This should never happen, but just in case
-  if(inspectingSize < head->size)
-    return NULL;
-
-  if(inspectingSize > head->size)
-  {
-    block_header_t* available = TraverseBlock(needSize, inspectingSize >> 1, head, TRUE);
-    if(available != NULL)
-      return available;
-
-    // To prevent infinite loops
-    if(!checkBuddy)
-      return NULL;
-    return TraverseBlock(needSize, inspectingSize, Buddy(head, inspectingSize), FALSE);
-  }
-
-  // inspectingSize == head->size
-  if(!head->used)
-    return head;
-  return NULL;
-
-}
-
-void* SplitBlock(block_header_t* bigBlock, int newSize)
-{
-  int effectiveSize;
-  bool top = TopOfPage(bigBlock);
-  if(top)
-    effectiveSize = NextPowerOfTwo(newSize + sizeof(page_header_t));
-  else
-    effectiveSize = NextPowerOfTwo(newSize);
-
-  int blockSize = bigBlock->size;
-  while(blockSize > effectiveSize)
-  {
-    blockSize >>= 1;
-    block_header_t* buddy = Buddy(bigBlock, blockSize);
-    buddy->size = blockSize;
-    buddy->used = FALSE;
-  }
-  bigBlock->size = blockSize;
-  bigBlock->used = TRUE;
-
-  return (void*)((size_t)bigBlock + sizeof(block_header_t) + (top ? sizeof(page_header_t) : 0));
-}
-
-inline void InitPage(kma_page_t* page)
-{
-  block_header_t* block = (block_header_t*)(page->ptr);
-  block->size = PAGESIZE;
-  block->used = FALSE;
-  page_header_t* pageHeader = (page_header_t*)((size_t)block + sizeof(*block));
-  pageHeader->thisPage = page;
-  pageHeader->nextPage = NULL;
-}
 
 void*
 kma_malloc(kma_size_t size)
 {
-  if(size > PAGESIZE - (sizeof(block_header_t) + sizeof(page_header_t)))
+  size = NextPowerOfTwo(size + sizeof(block_header_t));
+  if(size > PAGESIZE)
     return NULL;
 
-  size += sizeof(block_header_t);
-
-  if(firstPage == NULL)
+  if (bookkeepingPage == NULL)
   {
-    firstPage = get_page();
-    InitPage(firstPage);
+    bookkeepingPage = get_page();
+    bookkeeping_header_t* page = (bookkeeping_header_t*)(bookkeepingPage->ptr);
+    page->numHeaders = 1;
+    page->thisPage = bookkeepingPage;
+    
+    block_t* firstBlockStruct = (block_t*)((size_t)page + sizeof(*page));
+    page_t* firstPageStruct = (page_t*)((size_t)firstBlockStruct + sizeof(*firstBlockStruct));
+    page->firstBlock = firstBlockStruct;
+    page->lastBlock = firstBlockStruct;
+    page->firstPage = firstPageStruct;
+    page->lastPage = firstPageStruct;
+    page->nextAvailable = (void*)((size_t)firstPageStruct + sizeof(page_t));
+
+    firstPageStruct->page = get_page();
+    firstPageStruct->next = NULL;
+    firstPageStruct->prev = NULL;
+
+    firstBlockStruct->block = (block_header_t*)(firstPageStruct->page->ptr);
+    firstBlockStruct->size = PAGESIZE;
+    firstBlockStruct->next = NULL;
+    firstBlockStruct->prev = NULL;
+
+    block_header_t* firstBlock = firstBlockStruct->block;
+    firstBlock->info = PAGESIZE;
   }
 
+  bookkeeping_header_t* header = (bookkeeping_header_t*)(bookkeepingPage->ptr);
   
-  return SplitBlock(FindAvailableBlock(size), size);
-  
+  block_t* minBlock = NULL;
+  block_t* i;
+  for(i = header->firstBlock; i != NULL; i = i->next)
+  {
+    if(i->size == size)
+    {
+      minBlock = i;
+      break;
+    }
 
+    if(i->size > size &&
+      (minBlock == NULL || i->size < minBlock->size))
+    {
+      minBlock = i;
+    }
+  }
+
+  if(minBlock == NULL)
+  {
+    kma_page_t* newPage = get_page();
+    block_header_t* block = (block_header_t*)(newPage->ptr);
+    block->info = PAGESIZE;
+
+    void* nextAvailable = (void*)((size_t)(header->nextAvailable) + sizeof(page_t)) - 1;
+    if(BASEADDR(nextAvailable) != BASEADDR(header->lastPage) ||
+       BASEADDR(header->nextAvailable) != BASEADDR(header->lastBlock))
+    {
+      CreateBookkeepingPage();
+    }
+    page_t* nextPageStruct = (page_t*)(header->nextAvailable);
+    nextPageStruct->page = newPage;
+    nextPageStruct->next = NULL;
+    nextPageStruct->prev = header->lastPage;
+    header->lastPage->next = nextPageStruct;
+    header->lastPage = nextPageStruct;
+    header->nextAvailable = (void*)((size_t)nextAvailable + 1);
+    ((bookkeeping_header_t*)BASEADDR(nextPageStruct))->numHeaders++;
+
+    nextAvailable = (void*)((size_t)(header->nextAvailable) + sizeof(block_t)) - 1;
+    if(BASEADDR(nextAvailable) != BASEADDR(header->lastPage) ||
+       BASEADDR(nextAvailable) != BASEADDR(header->lastBlock))
+    {
+      CreateBookkeepingPage();
+    }
+    block_t* nextBlockStruct = (block_t*)(header->nextAvailable);
+    nextBlockStruct->block = (block_header_t*)(newPage->ptr);
+    nextBlockStruct->block->info = PAGESIZE;
+    nextBlockStruct->size = PAGESIZE;
+    nextBlockStruct->next = NULL;
+    nextBlockStruct->prev = header->lastBlock;
+    header->lastBlock->next = nextBlockStruct;
+    header->lastBlock = nextBlockStruct;
+    header->nextAvailable = (void*)((size_t)nextAvailable + 1);
+    ((bookkeeping_header_t*)BASEADDR(nextBlockStruct))->numHeaders++;
+
+    minBlock = nextBlockStruct;
+  }
+
+  while(minBlock->size > size)
+  {
+    minBlock->size >>= 1;
+    block_header_t* buddy = Buddy(minBlock->block, minBlock->size);
+    buddy->info = minBlock->size;
+    
+    void* nextAvailable = (void*)((size_t)(header->nextAvailable) + sizeof(block_t)) - 1;
+    if(BASEADDR(nextAvailable) != BASEADDR(header->lastPage) ||
+       BASEADDR(nextAvailable) != BASEADDR(header->lastBlock))
+    {
+      CreateBookkeepingPage();
+    }
+
+    block_t* nextBlockStruct = (block_t*)(header->nextAvailable);
+    nextBlockStruct->block = buddy;
+    nextBlockStruct->size = minBlock->size;
+    nextBlockStruct->next = NULL;
+    nextBlockStruct->prev = header->lastBlock;
+    header->lastBlock->next = nextBlockStruct;
+    header->lastBlock = nextBlockStruct;
+    ((bookkeeping_header_t*)BASEADDR(nextBlockStruct))->numHeaders++;
+  }
+
+
+
+  minBlock->block->info = minBlock->size | (PAGESIZE << 1);
+  if(minBlock->prev != NULL)
+    minBlock->prev->next = minBlock->next;
+  if(minBlock->next != NULL)
+    minBlock->next->prev = minBlock->prev;
+
+  bookkeeping_header_t* thisPage = (bookkeeping_header_t*)BASEADDR(minBlock);
+  thisPage->numHeaders--;
+  if(thisPage->numHeaders == 0)
+  {
+    if(thisPage == header)
+    {
+      bookkeeping_header_t* newFirstPage = (bookkeeping_header_t*)BASEADDR(header->firstBlock);
+      newFirstPage->firstBlock = header->firstBlock;
+      newFirstPage->lastBlock = header->lastBlock;
+      newFirstPage->firstPage = header->firstPage;
+      newFirstPage->lastPage = header->lastPage;
+      newFirstPage->nextAvailable = header->nextAvailable;
+      bookkeepingPage = newFirstPage->thisPage;
+    }
+    free_page(thisPage->thisPage);
+  }
+
+
+
+  return (void*)((size_t)(minBlock->block) + sizeof(block_header_t));
 }
 
 void 
 kma_free(void* ptr, kma_size_t size)
 {
-  ;
+  block_header_t* block = (block_header_t*)((size_t)ptr - sizeof(block_header_t));
+
+  bookkeeping_header_t* header = (bookkeeping_header_t*)(bookkeepingPage->ptr);
+
+  block_header_t* buddy = Buddy(block, block->info & ~(PAGESIZE << 1));
+  block_t* i;
+
+  bool coalesced = FALSE;
+  
+  while(buddy != NULL && !Used(buddy))
+  {
+    coalesced = TRUE;
+    for(i = header->firstBlock; i != NULL; i = i->next)
+    {
+      if(i->block == buddy)
+      {
+        i->size <<= 1;
+        i->block = (((size_t)block < (size_t)buddy) ? block : buddy);
+        block = i->block;
+        buddy = Buddy(block, i->size);
+        break;
+      }
+    }
+  }
+  for(i = header->firstBlock; i->block != block; i = i->next){}
+  if(buddy == NULL)
+  {
+    if(i->prev != NULL)
+      i->prev->next = i->next;
+    if(i->next != NULL)
+      i->next->prev = i->prev;
+
+    bookkeeping_header_t* thisPage = (bookkeeping_header_t*)BASEADDR(i);
+    thisPage->numHeaders--;
+    if(thisPage->numHeaders == 0)
+    {
+      if(thisPage == header)
+      {
+        bookkeeping_header_t* newFirstPage = (bookkeeping_header_t*)BASEADDR(header->firstBlock);
+        newFirstPage->firstBlock = header->firstBlock;
+        newFirstPage->lastBlock = header->lastBlock;
+        newFirstPage->firstPage = header->firstPage;
+        newFirstPage->lastPage = header->lastPage;
+        newFirstPage->nextAvailable = header->nextAvailable;
+        bookkeepingPage = newFirstPage->thisPage;
+        header = (bookkeeping_header_t*)(bookkeepingPage->ptr);
+      }
+      free_page(thisPage->thisPage);
+    }
+
+    void* page = (void*)(i->block);
+    page_t* j;
+    for(j = header->firstPage; j != NULL; j = j->next)
+    {
+      if(j->page->ptr == page)
+      {
+        if(j->prev != NULL)
+          j->prev->next = NULL;
+        if(j->next != NULL)
+          j->next->prev = NULL;
+        thisPage = (bookkeeping_header_t*)BASEADDR(j);
+        thisPage->numHeaders--;
+        if(thisPage->numHeaders == 0)
+        {
+          if(thisPage == header)
+          {
+            bookkeeping_header_t* newFirstPage = (bookkeeping_header_t*)BASEADDR(header->firstBlock);
+            newFirstPage->firstBlock = header->firstBlock;
+            newFirstPage->lastBlock = header->lastBlock;
+            newFirstPage->firstPage = header->firstPage;
+            newFirstPage->lastPage = header->lastPage;
+            newFirstPage->nextAvailable = header->nextAvailable;
+            bookkeepingPage = newFirstPage->thisPage;
+            header = (bookkeeping_header_t*)(bookkeepingPage->ptr);
+          }
+          free_page(thisPage->thisPage);
+        }
+        free_page(j->page);
+      }
+    }
+    return;
+  }
+
+  if(!coalesced)
+  {
+    void* nextAvailable = (void*)((size_t)(header->nextAvailable) + sizeof(block_t)) - 1;
+    if(BASEADDR(nextAvailable) != BASEADDR(header->lastPage) ||
+       BASEADDR(nextAvailable) != BASEADDR(header->lastBlock))
+    {
+      CreateBookkeepingPage();
+    }
+    block_t* nextBlockStruct = (block_t*)(header->nextAvailable);
+    nextBlockStruct->block = block;
+    nextBlockStruct->block->info &= ~(PAGESIZE << 1);
+    nextBlockStruct->size = nextBlockStruct->block->info;
+    nextBlockStruct->next = NULL;
+    nextBlockStruct->prev = header->lastBlock;
+    header->lastBlock->next = nextBlockStruct;
+    header->lastBlock = nextBlockStruct;
+    header->nextAvailable = (void*)((size_t)nextAvailable + 1);
+    ((bookkeeping_header_t*)BASEADDR(nextBlockStruct))->numHeaders++;
+    
+  }
+
 }
 
 #endif // KMA_BUD
