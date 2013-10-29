@@ -49,6 +49,11 @@
  *  structures and arrays, line everything up in neat columns.
  */
 
+/*
+Each block of memory is specified by a blockT struct.
+These structs are managed in a linked list.
+Each block of allocated memory begings w/ a corresponding blockT object.*/  
+
 typedef struct blockT
 {
   struct blockT* prev;
@@ -92,8 +97,13 @@ int CalcBlockSize(block_t* block)
   if(block == NULL)
     return -1;
 
+ /*Useable memory = start address of next block - start address of current block-size of header*/
   if(block->next != NULL && SamePage(block, block->next))
     return (int)((size_t)(block->next) - (size_t)block - sizeof(*block));
+
+/*In the case where you are the last block on the page...*/
+/*Useable memomory= address of end of page - start address of current block -
+size of header */
 
   void* endPage = (void*)((size_t)BASEADDR(block) + PAGESIZE);
   return (int)((size_t)endPage - (size_t)block - sizeof(*block));
@@ -102,22 +112,38 @@ int CalcBlockSize(block_t* block)
 void*
 kma_malloc(kma_size_t size)
 {
+/*This function will scan the LL, looking for the first available free block.
+(first fit). If no free block exsists, it will allocate a new page if necessary. */
+
+
+/* Each page begins w/ a pointer to a corresponding kma_page_t struct*/
+/* Each block begins w/ a corresponding block_t struct*/
+/* Therefore the total useable memory on any page = size of page - size of (block_t) - sizeof(kma_page_t*)*/ 
+
+/*A request for more memory than can be supplied by a single page is invalid*/
   if(size > PAGESIZE - sizeof(block_t) - sizeof(kma_page_t*))
     return NULL;
+
+/*If this is the first page we are allocating, we must initalize a first page and a LL to keep track of all subsequent blocks.*/
   if(firstPage == NULL)
   {
+   /*get the first page*/
     firstPage = get_page();
+   /*set a ptr to the corresponding kma_page_t struct at the top of the page*/
     *((kma_page_t**)firstPage->ptr) = firstPage;
+   /*create a new block which also provides an entry into the LL*/
     block_t* head = (block_t*)((size_t)firstPage->ptr + sizeof(kma_page_t*));
     head->prev = NULL;
     head->next = NULL;
     head->used = FALSE;
   }
 
-
+/*Search the LL for a free block*/
   block_t* block = (block_t*)((size_t)firstPage->ptr + sizeof(kma_page_t*));
   while(block->used || CalcBlockSize(block) < size)
   {
+    /*If you reach the end of the LL, there is no free block to be found*/
+    /*In this case you must allocate a new page.*/
     if(block->next == NULL)
     {
       kma_page_t* nextPage = get_page();
@@ -130,10 +156,18 @@ kma_malloc(kma_size_t size)
     }
     block = block->next;
   }
+
+  /*Once you escape the loop, you are gauranteed to have found a free block*/
+  /*If there wasn't a free block initally it was created when a new page was allocated*/
+
+/*fill the free block*/
   block->used = TRUE;
 
+/*the block which starts after the block you are filling begins at address, 
+address= start address of current block+size of header+ size of memory request*/
   block_t* newNext = (block_t*)((size_t)block + sizeof(*block) + size);
 
+/*Make sure you have enough room for your header.*/
   int availableSpace;
   if(block->next != NULL && SamePage(block, block->next))
     availableSpace = (int)((size_t)(block->next) - (size_t)newNext);
@@ -157,10 +191,33 @@ kma_malloc(kma_size_t size)
 void
 kma_free(void* ptr, kma_size_t size)
 {
+
+/*This function frees a block of memory and performs coalescing if necessary*/
+
+/*There are 4 basic cases for coalescing:
+1: Free-Free: the blocks before and after the current block are free
+	-Coalesece all 3 blocks into 1 block
+2: Free-Used: the block before the current block is free, after is used
+	-Coalesce the top 2 blocks into 1 block
+3: Used-Free: the block before the current block is used, after is free
+	-Coalesce the bottom 2 blocks into 1 block
+4: Used-Used: the block before and after the current block are used.
+	-Cannot Coalesce
+*/
+
+/*We cannot coalesce between pages, so we must test for these cases as well"
+1: Block at top of page: current block can only coalesce with block after it.
+
+2: Block at bottom of page: current block can only coalesce with block before it.*/ 
+
   if(ptr == NULL)
     return;
 
+  /*set curBlock to point to the top of the block*/
+  /*top of block = start of useable memory - size of header*/
+
   block_t* curBlock = (block_t*)((size_t)ptr - sizeof(block_t));
+
 
   if((curBlock->prev != NULL) && 
      SamePage(curBlock, curBlock->prev) && 
@@ -172,11 +229,13 @@ kma_free(void* ptr, kma_size_t size)
        SamePage(curBlock, curBlock->next) &&
        (!curBlock->next->used))
 
+  //Free-Free Case
     {
       curBlock->prev->next = curBlock->next->next;
       if(curBlock->next->next != NULL)
         curBlock->next->next->prev = curBlock->prev;
     }
+  //Free-Used Case
     else
     {
       curBlock->prev->next = curBlock->next;
@@ -190,6 +249,7 @@ kma_free(void* ptr, kma_size_t size)
     if((curBlock->next != NULL) && 
        SamePage(curBlock, curBlock->next) &&
        (!curBlock->next->used))
+   //Used-Free Case
     {
       curBlock->next = curBlock->next->next;
       if(curBlock->next != NULL)
@@ -197,6 +257,8 @@ kma_free(void* ptr, kma_size_t size)
     }
   }
 
+   //Used-Used Case: cannot coalesce 
+ 
   // There will always be a block_t struct at the beginning of any
   // page.
   block_t* base = (block_t*)((size_t)BASEADDR(curBlock) + sizeof(kma_page_t*));
